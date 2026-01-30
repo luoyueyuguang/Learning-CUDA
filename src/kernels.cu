@@ -17,10 +17,64 @@
  * @param cols Number of columns in the matrix.
  * @return The trace (sum of diagonal values) of the matrix.
  */
+
+#define CEIL(x, y) (((x) + (y) - 1) / (y))
+
+//实现cuda算子
+template <typename T>
+__global__ void traceKernel(const T* d_input, T* d_output, size_t rows, size_t cols) {
+  size_t idx = threadIdx.x + blockIdx.x * blockDim.x;
+  const int wrapSize = 32; // Assuming a warp size of 32
+  int wrap_id = threadIdx.x / wrapSize;
+  int lane_id = threadIdx.x % wrapSize;
+  __shared__ T shared_data[32];
+
+  T val = (idx < rows && idx < cols) ? d_input[idx * cols + idx] : (T)0;
+  #pragma unroll
+  for(int offset = wrapSize / 2; offset > 0; offset /= 2) {
+    val += __shfl_down_sync(0xffffffff, val, offset);
+  }
+
+  if(lane_id == 0) {
+    shared_data[wrap_id] = val;
+  }
+  __syncthreads();
+  if(wrap_id == 0) {
+    int wrapnum = (blockDim.x / wrapSize);
+    val = lane_id < wrapnum ? shared_data[lane_id] : (T)0;
+    __syncthreads();
+    #pragma unroll
+    for(int offset = wrapnum / 2; offset > 0; offset /= 2) {
+      val += __shfl_down_sync(0xffffffff, val, offset);
+    }
+    if(lane_id == 0) {
+      atomicAdd(d_output, val);
+    }
+  }
+}
+// template <typename T>
+// __global__ void traceKernel(const T* d_input, T* d_output, size_t rows, size_t cols) {
+//   int idx = threadIdx.x + blockIdx.x * blockDim.x;
+//   if (idx < rows && idx < cols) {
+//     atomicAdd(d_output, d_input[idx * cols + idx]);
+//   }
+// }
+
 template <typename T>
 T trace(const std::vector<T>& h_input, size_t rows, size_t cols) {
   // TODO: Implement the trace function
-  return T(-1);
+  // return T(-1);
+  T h_output = 0;
+  T* d_input;
+  T* d_output;
+  cudaMalloc(&d_input, h_input.size() * sizeof(T));
+  cudaMalloc(&d_output, sizeof(T));
+  cudaMemcpy(d_input, h_input.data(), h_input.size() * sizeof(T), cudaMemcpyHostToDevice);
+  traceKernel<<<CEIL(rows, 256), 256>>>(d_input, d_output, rows, cols);
+  cudaMemcpy(&h_output, d_output, sizeof(T), cudaMemcpyDeviceToHost);
+  cudaFree(d_input);
+  cudaFree(d_output);
+  return h_output;
 }
 
 /**
